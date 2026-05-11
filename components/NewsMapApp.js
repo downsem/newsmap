@@ -15,6 +15,50 @@ function debounce(fn, delay) {
   };
 }
 
+function providerName(key) {
+  if (key === 'gdelt') return 'GDELT';
+  if (key === 'googleNewsRss') return 'Google News RSS';
+  return key;
+}
+
+function providerStatusItems(meta) {
+  return Object.entries(meta.debug?.providerStatus || {}).map(([key, value]) => ({
+    name: providerName(key),
+    value: String(value || 'unknown'),
+    failed: String(value || '').toLowerCase().includes('failed')
+  }));
+}
+
+function feedTone(meta) {
+  if (meta.error) return 'failed';
+  if (meta.mode === 'loading') return 'loading';
+  if (meta.mode?.includes('no-verified')) return 'empty';
+  if (meta.mode?.includes('live')) return 'live';
+  if (meta.mode?.includes('mock')) return 'mock';
+  return 'neutral';
+}
+
+function feedStatusLabel(meta) {
+  if (meta.error) return 'Provider error';
+  if (meta.mode === 'loading') return 'Starting provider check';
+  if (meta.mode?.includes('no-verified')) return 'No verified local matches';
+  if (meta.mode?.includes('live')) return 'Live local matches';
+  if (meta.mode?.includes('mock')) return 'Mock fallback';
+  return meta.mode || 'Provider status';
+}
+
+function sourceLine(cluster) {
+  const sourceNames = [...new Set((cluster.sources || []).map((source) => source.outlet).filter(Boolean))];
+  if (!sourceNames.length) {
+    const count = cluster.sourceCount || 0;
+    return `${count} source${count === 1 ? '' : 's'}`;
+  }
+
+  const shown = sourceNames.slice(0, 2).join(', ');
+  const remaining = Math.max(0, (cluster.sourceCount || sourceNames.length) - sourceNames.slice(0, 2).length);
+  return remaining > 0 ? `${shown} + ${remaining} more` : shown;
+}
+
 export default function NewsMapApp() {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
@@ -191,6 +235,12 @@ export default function NewsMapApp() {
     mapRef.current?.flyTo({ center: item.center, zoom: item.zoom, speed: 0.85 });
   }
 
+  const statusItems = providerStatusItems(feedMeta);
+  const failedProviders = statusItems.filter((item) => item.failed);
+  const tone = feedTone(feedMeta);
+  const isInitialLoading = (loading || feedMeta.mode === 'loading') && clusters.length === 0;
+  const showEmptyState = !isInitialLoading && !loading && clusters.length === 0;
+
   if (!token) {
     return (
       <main className="token-warning">
@@ -229,30 +279,82 @@ export default function NewsMapApp() {
 
       {!selected && (
         <aside className="drawer">
-          <section className="panel">
+          <section className="panel feed-panel">
             <div className="panel-header">
               <div>
-                <h2>{loading ? 'Finding story clusters…' : 'Visible story clusters'}</h2>
-                <span>{clusters.length} cluster{clusters.length === 1 ? '' : 's'} in this view · {feedMeta.queryLabel}</span>
+                <h2>{loading ? 'Finding story clusters...' : 'Visible story clusters'}</h2>
+                <span>{feedMeta.queryLabel}</span>
               </div>
+              <span className="cluster-count">{clusters.length}</span>
             </div>
-            <div className="source-status">
-              <span className={`status-dot ${feedMeta.mode?.includes('live') ? 'live' : 'mock'}`} />
-              <div>
-                <strong>{feedMeta.dataSource}</strong>
-                <p>{feedMeta.mode} · cache {feedMeta.cacheStatus}{feedMeta.error ? ` · ${feedMeta.error}` : ''}</p>
+            <div className={`source-status ${tone}`}>
+              <span className={`status-dot ${tone}`} />
+              <div className="status-copy">
+                <div className="status-heading">
+                  <strong>{feedMeta.dataSource}</strong>
+                  <span>{feedMeta.cacheStatus === 'none' ? 'cache pending' : `cache ${feedMeta.cacheStatus}`}</span>
+                </div>
+                <p>{feedStatusLabel(feedMeta)}</p>
+                {statusItems.length > 0 && (
+                  <div className="provider-row" aria-label="Provider status">
+                    {statusItems.map((item) => (
+                      <span key={item.name} className={`provider-chip ${item.failed ? 'failed' : 'ok'}`}>
+                        <strong>{item.name}</strong>
+                        {item.value}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {(failedProviders.length > 0 || feedMeta.error) && (
+                  <div className="provider-alert">
+                    <strong>Provider issue</strong>
+                    <span>{feedMeta.error || failedProviders.map((item) => `${item.name}: ${item.value}`).join(' | ')}</span>
+                  </div>
+                )}
+                {feedMeta.debug?.queryTerm && (
+                  <p className="source-note">Query: {feedMeta.debug.queryTerm}{feedMeta.debug.fallbackQueryTerm && feedMeta.debug.fallbackQueryTerm !== feedMeta.debug.queryTerm ? ` / fallback ${feedMeta.debug.fallbackQueryTerm}` : ''}</p>
+                )}
                 {feedMeta.sourceNote && <p className="source-note">{feedMeta.sourceNote}</p>}
-                {feedMeta.debug?.queryTerm && <p className="source-note">Query: {feedMeta.debug.queryTerm}{feedMeta.debug.fallbackQueryTerm && feedMeta.debug.fallbackQueryTerm !== feedMeta.debug.queryTerm ? ` → fallback ${feedMeta.debug.fallbackQueryTerm}` : ''}</p>}
               </div>
             </div>
-            <div className="story-list">
+            <div className="story-list feed-list">
+              {loading && clusters.length > 0 && (
+                <div className="feed-inline-state">
+                  <span className="loader-dot" />
+                  Updating this view
+                </div>
+              )}
+              {isInitialLoading && (
+                <div className="feed-state loading-state">
+                  <span className="loader-ring" />
+                  <div>
+                    <strong>Checking local providers</strong>
+                    <p>Looking for verified story clusters around {feedMeta.queryLabel}.</p>
+                  </div>
+                </div>
+              )}
+              {showEmptyState && (
+                <div className="feed-state empty-state">
+                  <strong>No visible story clusters</strong>
+                  <p>{feedMeta.sourceNote || 'Live providers returned no verified local matches for this map area.'}</p>
+                </div>
+              )}
               {clusters.map((cluster) => (
                 <button key={cluster.id} className="story-card" onClick={() => setSelected(cluster)}>
+                  <div className="story-card-top">
+                    <span>{cluster.locationName}</span>
+                    <time>{cluster.updatedAt || 'Recent'}</time>
+                  </div>
                   <h3>{cluster.title}</h3>
-                  <p>{cluster.locationName} · {cluster.topic}</p>
+                  <p className="story-topic">{cluster.topic || cluster.level}</p>
+                  {cluster.summary && <p className="story-summary">{cluster.summary}</p>}
+                  <div className="story-source-row">
+                    <span>{sourceLine(cluster)}</span>
+                    <span>{cluster.dataSource || feedMeta.dataSource}</span>
+                  </div>
                   <div className="meta-row">
-                    <span className="meta-chip">{cluster.sourceCount} sources</span>
-                    <span className="meta-chip">{cluster.updatedAt}</span>
+                    <span className="meta-chip">{cluster.sourceCount} source{cluster.sourceCount === 1 ? '' : 's'}</span>
+                    <span className="meta-chip">{cluster.level} level</span>
                     {cluster.dataSource && <span className="meta-chip">{cluster.dataSource}</span>}
                   </div>
                 </button>
@@ -261,7 +363,7 @@ export default function NewsMapApp() {
           </section>
 
           {(savedStories.length > 0 || savedLocations.length > 0) && (
-            <section className="panel">
+            <section className="panel saved-panel">
               <div className="panel-header">
                 <div>
                   <h2>Saved</h2>
